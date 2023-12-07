@@ -11,6 +11,41 @@ from einops import rearrange, repeat
 from functools import partial
 from models.DeIT import *
 
+class SACBlock(nn.Module):
+  def __init__(self, inplanes, expand1x1_planes=None, bn_d = 0.1):
+
+    super(SACBlock, self).__init__()
+    self.inplanes = inplanes
+    self.bn_d = bn_d
+
+    self.attention_x = nn.Sequential(
+            nn.Conv2d(3, 9 * self.inplanes, kernel_size = 7, padding = 3),
+            nn.BatchNorm2d(9 * self.inplanes, momentum = 0.1),
+            )
+
+    self.position_mlp_2 = nn.Sequential(
+            nn.Conv2d(9 * self.inplanes, self.inplanes, kernel_size = 1),
+            nn.BatchNorm2d(self.inplanes, momentum = 0.1),
+            nn.ReLU(inplace = True),
+            nn.Conv2d(self.inplanes, self.inplanes, kernel_size = 3, padding = 1),
+            nn.BatchNorm2d(self.inplanes, momentum = 0.1),
+            nn.ReLU(inplace = True),
+            )
+
+  def forward(self, input1, input2, input3):
+    xyz = input1 ### coordinate map
+    new_xyz= input2  ### coordinate map
+    feature = input3  ### coordinate map with r and intensity
+    N,C,H,W = feature.size()
+
+    new_feature = F.unfold(feature, kernel_size = 3, padding = 1).view(N, -1, H, W)
+    attention = F.sigmoid(self.attention_x(new_xyz))
+    new_feature = new_feature * attention
+    new_feature = self.position_mlp_2(new_feature)
+    fuse_feature = new_feature + feature
+   
+    return xyz, new_xyz, fuse_feature
+
 def sample_and_group(npoint, nsample, xyz, points):
     B, N, C = xyz.shape
     S = npoint 
@@ -425,8 +460,10 @@ class PointTransformerSeg(VisionTransformer):
 
         # replace last head layer
         if cfg.model.head =='AMSoftmax':
+            print("head is AMsoftmax  #####################")
             self.head = AMSoftmaxLayer(self.embed_dim // 4, self.n_classes)
         else:
+            print("head is Linear #####################")
             self.head = nn.Linear(self.embed_dim // 4, self.n_classes)
 
         # Setup different positional embedding
@@ -455,6 +492,24 @@ class PointTransformerSeg(VisionTransformer):
             nn.Linear(self.embed_dim // 4, self.embed_dim // 4)
         )
         
+        self.sac_conv1 = nn.Sequential(
+            nn.Conv2d(5, 32, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1)
+        )
+        self.sac1 = SACBlock(32)
+        self.sac_conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1)
+        )
+        self.sac2 = SACBlock(64)
+        # self.sac_post = nn.Sequential(
+
+        # )
+        # self.sac_head = nn.Sequential(
+          
+        # )
 
     def __load_transformer_config(self):
 
@@ -494,31 +549,41 @@ class PointTransformerSeg(VisionTransformer):
     def forward_features(self, x):
         pos_embedding = self.pos_embed_type
         if pos_embedding is None or pos_embedding=="default" or pos_embedding=="no_embed":
-            #_,_,xyz, f = self.patch_embed(x)
-            #print(f.shape)
-            #f=f.transpose(1,2)
+            # _,_,xyz, f = self.patch_embed(x)
+            # print(f.shape)
+            # f=f.transpose(1,2)
             xyz, f= x[...,:3], self.fc1(x)
+            # print(f'xyz, f shape: {xyz.shape}, {f.shape}')
             f = self.pos_drop(f + self.fc_pos_embed(xyz))
+            # print(f'f shape after: {f.shape}')
 
             xyz_0, points_0 = self.transition_downs[0](xyz, f)
             xyz_1, points_1 = self.transition_downs[1](xyz_0, points_0)
             x = points_1
+            # print(f'xyz_0, points_0 shape: {xyz_0.shape}, {points_0.shape}')
+            # print(f'xyz_1, points_1 shape: {xyz_1.shape}, {points_1.shape}')
+            # print(f'x shape: {x.shape}')
 
+            #x = torch.cat((x, sac_feats), dim=1)    #### our addition
+    
             cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
             if self.dist_token is None:
                 x = torch.cat((cls_token, x), dim=1)
             else:
                 x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
-
+            # print(f'x shape after concat: {x.shape}')
             # Difference starting from here:
 
             for blk in self.blocks:
                 x = blk(x)
+            # print(f'x after transformer shape: {x.shape}')
             x = self.norm(x)
             x = x[:, 1:]
             x = self.transition_ups[0](xyz_1, x, xyz_0, points_0)
+            # print(f'x after t up1 shape: {x.shape}')
             # print(xyz_0.shape, x.shape, xyz.shape, f.shape)
             x = self.transition_ups[1](xyz_0, x, xyz, f)
+            # print(f'x after t up2 shape: {x.shape}')
             #print(x.shape)
             return x
         else:
@@ -529,8 +594,21 @@ class PointTransformerSeg(VisionTransformer):
         Input b * n_points * (3 + n_object_class)
         Output b * n_points * n_part_class
         """
-        
+        # lidar_image  = 
+        # lidar_feats1 = self.sac_conv1(lidar_image)
+        # sac_feats1 = self.sac1(lidar_image[..., :3], lidar_image[..., :3], lidar_feats1)
+        # lidar_feats2 = self.sac_conv2(sac_feats1)
+        # sac_feats2 = self.sac2(lidar_image[..., :3], lidar_image[..., :3], lidar_feats2)
+        # print(f'lidar_image, lidar_feats1, lidar_feats2: {lidar_image.shape}, {lidar_feats1.shape}, {lidar_feats2.shape}')
+        # print(f'sac_feats1, sac_feats2: {sac_feats1.shape}, {sac_feats2.shape}')
+        # print(x.shape)
         x = self.forward_features(x)
+        # sac_feats = self.sac_post(sac_feats2)
+        # x = self.forward_features(x, sac_feats)
+        # sac_head_feats = self.sac_head(sac_feats2)
+        # y = torch.cat((x, sac_head_feats), dim=-1)
+        # print(f'y shape: {y.shape}')
         x = self.head(x)
+        # print(f'final shape of x: {x.shape}')
         return x
 

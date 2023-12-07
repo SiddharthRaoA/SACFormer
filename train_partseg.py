@@ -19,6 +19,7 @@ import hydra
 import omegaconf
 from ptflops import get_model_complexity_info
 from torch.utils.data import RandomSampler, DataLoader, Subset
+from data.parser import SemanticKitti
 
 #TODO: Fix random seeds
 torch.hub.set_dir('./weights')
@@ -57,12 +58,35 @@ def main(args):
 
     root = hydra.utils.to_absolute_path(args.data_path)
 
-    TRAIN_DATASET = PartNormalDataset(root=root, npoints=args.num_point, split='trainval', normal_channel=args.normal)
-    train_ds = Subset(TRAIN_DATASET, np.random.choice(range(len(TRAIN_DATASET)), int(len(TRAIN_DATASET)*args.portion)))
-    trainDataLoader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
-    TEST_DATASET = PartNormalDataset(root=root, npoints=args.num_point, split='test', normal_channel=args.normal)
-    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
+    # TRAIN_DATASET = PartNormalDataset(root=root, npoints=args.num_point, split='trainval', normal_channel=args.normal)
+    # train_ds = Subset(TRAIN_DATASET, np.random.choice(range(len(TRAIN_DATASET)), int(len(TRAIN_DATASET)*args.portion)))
     
+    # trainDataLoader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
+    # TEST_DATASET = PartNormalDataset(root=root, npoints=args.num_point, split='test', normal_channel=args.normal)
+    # testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
+    
+    print(type(args["labels"]))
+    TRAIN_DATASET = SemanticKitti(root='data/dataset',
+                            sequences=list(args["split"]["train"]),
+                            labels=dict(args["labels"]),
+                            color_map=dict(args["color_map"]),
+                            learning_map=dict(args["learning_map"]),
+                            learning_map_inv=dict(args["learning_map_inv"]),
+                            sensor=args["dataset"]["sensor"],
+                            max_points=args["dataset"]["max_points"],
+                            gt=True)
+    
+    print("len", len(TRAIN_DATASET))
+    
+    train_ds = Subset(TRAIN_DATASET, np.random.choice(range(len(TRAIN_DATASET)), int(len(TRAIN_DATASET)*args.portion)))
+
+    trainDataLoader = torch.utils.data.DataLoader(train_ds,
+                                                batch_size=args["train"]["batch_size"],
+                                                shuffle=True,
+                                                num_workers=args["train"]["workers"],
+                                                pin_memory=True,
+                                                drop_last=True)
+
 
     '''MODEL LOADING'''
     args.input_dim = (6 if args.normal else 3) + 16
@@ -108,10 +132,10 @@ def main(args):
     best_class_avg_iou = 0
     best_inctance_avg_iou = 0
 
-    macs, params = get_model_complexity_info(classifier, (1024, 22), as_strings=True,
-                                           print_per_layer_stat=True, verbose=True)
-    print('{:<30}  {:<8}'.format('Computational complexity: ', macs))
-    print('{:<30}  {:<8}'.format('Number of parameters: ', params))
+    # macs, params = get_model_complexity_info(classifier, (1024, 22), as_strings=True,
+                                        #    print_per_layer_stat=True, verbose=True)
+    # print('{:<30}  {:<8}'.format('Computational complexity: ', macs))
+    # print('{:<30}  {:<8}'.format('Number of parameters: ', params))
 
 
     for epoch in range(start_epoch, args.epoch):
@@ -131,7 +155,9 @@ def main(args):
         classifier = classifier.train()
 
         '''learning one epoch'''
-        for i, (points, label, target) in tqdm(enumerate(trainDataLoader), total=len(trainDataLoader), smoothing=0.9):
+        for i, (points, label, target, lidar_img) in tqdm(enumerate(trainDataLoader), total=len(trainDataLoader), smoothing=0.9):
+            
+            # label = args[]
             points = points.data.numpy()
             points[:, :, 0:3] = provider.random_scale_point_cloud(points[:, :, 0:3])
             points[:, :, 0:3] = provider.shift_point_cloud(points[:, :, 0:3])
